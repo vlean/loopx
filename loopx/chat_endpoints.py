@@ -214,6 +214,12 @@ class AgentEndpoint:
             "streaming": True,
             "resume": True,
             "interrupt": True,
+            # ACP has no mid-turn steering call, so an owner-local endpoint is
+            # never offered a steering lane it would refuse at runtime. Image
+            # support is per-Agent in the ACP handshake and unknown until a
+            # session opens, so the row does not advertise it.
+            "steering": False,
+            "images": False,
             "tool_calls": True,
             "source": "owner_local_registry",
         }

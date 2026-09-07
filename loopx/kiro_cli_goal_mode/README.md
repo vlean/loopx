@@ -138,6 +138,15 @@ Two boundaries this does **not** cross:
 The built-in id `kiro-cli` is reserved in the owner-local endpoint registry so
 a hand-registered endpoint cannot silently shadow it.
 
+The capability row states what the host can actually do, so the dashboard never
+offers a lane Kiro would refuse:
+
+| Capability | Kiro CLI | Why |
+| --- | --- | --- |
+| `streaming` / `resume` / `interrupt` | yes | ACP `session/update`, `session/load`, `session/cancel` |
+| `images` | yes | the handshake advertises `promptCapabilities.image`, and the adapter re-reads it before sending a block. Probed on 2.21.1: the block is accepted and the turn completes normally. Whether the selected Kiro agent and engine actually read the image is theirs to decide — the default `v2` engine in that probe declined to analyze it — so this declares delivery, not vision. |
+| `steering` | no | ACP v1 has no mid-turn steering call, so LoopX reports `live_steering_unsupported_by_agent` instead of failing as if the session were dead |
+
 ## Control-plane identity
 
 Serving an Agent row is not the same as being reachable. Three surfaces resolve

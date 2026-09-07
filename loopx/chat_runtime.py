@@ -30,6 +30,49 @@ from .chat_providers import ClaudeCodeAdapter, direct_model_from_environment
 
 
 EventSink = Callable[[str, dict[str, Any]], None]
+
+
+def adapter_supports_steering(adapter: Any) -> bool:
+    """Whether a live adapter can accept a mid-turn steering message.
+
+    Steering is an adapter capability, not an adapter class. Asking the adapter
+    keeps the runtime gate, the capability row the dashboard renders, and the
+    Lark ingress choice reading the same fact, so a host that only supports
+    interrupt is never offered a steering lane it will refuse at runtime. Both
+    halves are required: the declared capability and the concrete method.
+    """
+    if adapter is None or not callable(getattr(adapter, "steer_turn", None)):
+        return False
+    try:
+        return bool(adapter.capabilities().get("steering"))
+    except Exception:  # a disconnected adapter cannot be steered either
+        return False
+
+
+def adapter_supports_image_attachments(adapter: Any) -> bool:
+    """Whether a live adapter can carry image attachments in a turn.
+
+    Codex accepts them through its own turn input; an ACP Agent accepts them
+    only when it advertised `promptCapabilities.image`. Asking the adapter keeps
+    hosts that already support images from being refused because they are not
+    Codex, and keeps a host that never advertised the capability from receiving
+    a block it would reject.
+    """
+    if adapter is None or not callable(
+        getattr(adapter, "start_turn_with_attachments", None)
+    ):
+        return False
+    try:
+        capabilities = adapter.capabilities()
+    except Exception:
+        return False
+    if "images" in capabilities:
+        return bool(capabilities["images"])
+    # Adapters predating the declaration keep their existing behavior: the
+    # method's presence is the capability.
+    return True
+
+
 class ChatRuntimeAdapter(Protocol):
     @property
     def upstream_thread_id(self) -> str: ...
@@ -84,6 +127,7 @@ class CodexAppServerAdapter:
             "resume": True,
             "interrupt": True,
             "steering": True,
+            "images": True,
         }
 
     def start_turn(self, message: str, event_sink: EventSink) -> dict[str, Any]:
@@ -249,6 +293,8 @@ class ChatRuntimeController:
                 "streaming": True,
                 "resume": True,
                 "interrupt": True,
+                "steering": True,
+                "images": True,
                 "tool_calls": True,
                 "trust_scope": "read_only",
                 "source": "builtin",
@@ -261,6 +307,8 @@ class ChatRuntimeController:
                 "streaming": True,
                 "resume": True,
                 "interrupt": True,
+                "steering": False,
+                "images": False,
                 "tool_calls": True,
                 "trust_scope": "read_only",
                 "source": "builtin",
@@ -280,6 +328,13 @@ class ChatRuntimeController:
                 "streaming": True,
                 "resume": True,
                 "interrupt": True,
+                "steering": False,
+                # Kiro's ACP handshake advertises promptCapabilities.image, so
+                # the row offers it. The adapter re-reads the live handshake
+                # before sending a block, so a host build that drops the
+                # capability fails closed at the protocol boundary rather than
+                # on this advertisement.
+                "images": True,
                 "tool_calls": True,
                 "trust_scope": "read_only",
                 "source": "builtin",
@@ -292,6 +347,8 @@ class ChatRuntimeController:
                 "streaming": False,
                 "resume": True,
                 "interrupt": False,
+                "steering": False,
+                "images": False,
                 "tool_calls": True,
                 "trust_scope": "read_only",
                 "source": "builtin",
@@ -304,6 +361,8 @@ class ChatRuntimeController:
                 "streaming": False,
                 "resume": True,
                 "interrupt": False,
+                "steering": False,
+                "images": False,
                 "tool_calls": True,
                 "trust_scope": "read_only",
                 "source": "builtin",
@@ -520,8 +579,16 @@ class ChatRuntimeController:
                 session.get("agent_id") == "codex"
                 and session.get("upstream_mode") != "chat"
             )
-            retry_failed_claude_session = (
-                session.get("agent_id") == "claude-code"
+            # A session whose provider was unavailable, or whose last stored
+            # message is an error, holds an upstream thread id the provider
+            # never accepted. Resuming it replays the same failure forever, so
+            # the recovery drops the stale id and replays visible history
+            # instead. This was previously reachable only for `claude-code`;
+            # every non-Codex adapter — including ACP hosts such as Kiro CLI,
+            # whose `session/load` would keep rejecting the dead session id —
+            # now takes the same path. Codex keeps its own thread rule above.
+            retry_failed_provider_session = (
+                session.get("agent_id") != "codex"
                 and (
                     session.get("last_error_code") == "provider_unavailable"
                     or bool(stored_messages and stored_messages[-1].get("role") == "error")
@@ -538,12 +605,12 @@ class ChatRuntimeController:
                 objective=objective,
                 resume_thread_id=(
                     None
-                    if legacy_codex_goal_thread or retry_failed_claude_session
+                    if legacy_codex_goal_thread or retry_failed_provider_session
                     else str(session["upstream_thread_id"])
                 ),
                 history=(
                     history
-                    if legacy_codex_goal_thread or retry_failed_claude_session
+                    if legacy_codex_goal_thread or retry_failed_provider_session
                     or session.get("agent_id") in {"anthropic-api", "openai-api"}
                     else None
                 ),
@@ -681,7 +748,18 @@ class ChatRuntimeController:
             raise RuntimeError("live_steering_requires_active_turn")
         with self.lock:
             adapter = self.adapters.get(session_id)
-        if not isinstance(adapter, CodexAppServerAdapter) or not adapter.healthcheck():
+        if not adapter_supports_steering(adapter):
+            # A session that cannot be steered is a different fact from a dead
+            # one. Reporting both as "not attached" sent the operator looking
+            # for a broken session instead of an Agent without the capability.
+            self.store.update_ingress_receipt(
+                session_id,
+                client_ingress_id,
+                status="failed",
+                error_code="live_steering_unsupported_by_agent",
+            )
+            raise RuntimeError("live_steering_unsupported_by_agent")
+        if not adapter.healthcheck():
             self.store.update_ingress_receipt(
                 session_id,
                 client_ingress_id,
@@ -903,8 +981,10 @@ class ChatRuntimeController:
 
         try:
             if attachments:
-                if not isinstance(adapter, CodexAppServerAdapter):
-                    raise ValueError("image attachments currently require the Codex Agent endpoint")
+                if not adapter_supports_image_attachments(adapter):
+                    raise ValueError(
+                        "the selected Agent endpoint does not accept image attachments"
+                    )
                 response = adapter.start_turn_with_attachments(message, event_sink, attachments)
             else:
                 response = adapter.start_turn(message, event_sink)

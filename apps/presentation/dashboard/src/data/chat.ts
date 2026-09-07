@@ -120,6 +120,8 @@ export const chatCapabilitiesSchema = z.object({
     interrupt: z.boolean(),
     location: z.string().optional(),
     source: z.string().optional(),
+    steering: z.boolean().optional(),
+    images: z.boolean().optional(),
     tool_calls: z.boolean().optional(),
     trust_scope: z.string().optional(),
   })).optional(),

@@ -212,8 +212,24 @@ class ACPStdioAdapter:
             "resume": bool(self.agent_capabilities.get("loadSession"))
             or isinstance(session_capabilities.get("resume"), dict),
             "interrupt": True,
+            # ACP v1 has no mid-turn steering call; `session/cancel` interrupts.
+            "steering": False,
+            "images": self.supports_image_prompts(),
             "tool_calls": True,
         }
+
+    def supports_image_prompts(self) -> bool:
+        """Whether the connected Agent accepts an ACP image prompt block.
+
+        ACP declares this per Agent in `promptCapabilities`, so LoopX asks the
+        Agent instead of assuming. Sending an image block to an Agent that did
+        not advertise it is a protocol violation, and refusing one that did
+        would strand a capability the host already supports.
+        """
+        prompt_capabilities = self.agent_capabilities.get("promptCapabilities")
+        if not isinstance(prompt_capabilities, dict):
+            return False
+        return prompt_capabilities.get("image") is True
 
     def _write(self, payload: dict[str, Any]) -> None:
         if self.process.stdin is None:
@@ -316,6 +332,57 @@ class ACPStdioAdapter:
                 self.current_request_id = None
 
     def start_turn(self, message: str, event_sink: EventSink) -> dict[str, Any]:
+        return self._start_turn(message, event_sink, attachments=[])
+
+    def start_turn_with_attachments(
+        self,
+        message: str,
+        event_sink: EventSink,
+        attachments: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return self._start_turn(message, event_sink, attachments=attachments)
+
+    def _image_prompt_blocks(
+        self,
+        attachments: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """ACP image content blocks for already-validated Chat attachments.
+
+        LoopX stores an attachment as a validated base64 data URL; ACP wants the
+        payload and mime type as separate fields, so split rather than forward
+        the URL. A malformed entry cannot appear here — `chat_attachments`
+        rejects it at the API boundary — so this only performs the shape change
+        and fails closed if the Agent never advertised image support.
+        """
+        if not attachments:
+            return []
+        if not self.supports_image_prompts():
+            raise self._provider_error(
+                "This Agent does not accept image attachments.",
+                "Send the message without images, or choose an Agent that "
+                "advertises image support.",
+            )
+        blocks: list[dict[str, Any]] = []
+        for attachment in attachments:
+            data_url = str(attachment.get("data_url") or "")
+            header, _, encoded = data_url.partition(",")
+            if not encoded or not header.startswith("data:"):
+                continue
+            mime_type = str(
+                attachment.get("mime_type")
+                or header[len("data:") :].split(";", 1)[0]
+            )
+            blocks.append({"type": "image", "data": encoded, "mimeType": mime_type})
+        return blocks
+
+    def _start_turn(
+        self,
+        message: str,
+        event_sink: EventSink,
+        *,
+        attachments: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        image_blocks = self._image_prompt_blocks(attachments)
         event_sink("turn.started", {"upstream_turn_id": self.session_id})
         event_sink("agent.phase", {"label": "正在连接 ACP Agent"})
         parts: list[str] = []
@@ -373,7 +440,10 @@ class ACPStdioAdapter:
                 "session/prompt",
                 {
                     "sessionId": self.session_id,
-                    "prompt": [{"type": "text", "text": _turn_prompt(message)}],
+                    "prompt": [
+                        {"type": "text", "text": _turn_prompt(message)},
+                        *image_blocks,
+                    ],
                 },
                 request_id=request_id,
                 timeout_sec=self.hard_timeout_sec,

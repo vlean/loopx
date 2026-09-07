@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import json
 import stat
 import sys
 import tempfile
@@ -15,8 +16,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from loopx.chat_acp import ACPStdioAdapter  # noqa: E402
+from loopx.chat_agent import CodexChatAgentError  # noqa: E402
 from loopx.chat_endpoints import AgentEndpointRegistry  # noqa: E402
-from loopx.chat_runtime import ChatRuntimeController  # noqa: E402
+from loopx.chat_runtime import (  # noqa: E402
+    ChatRuntimeController,
+    adapter_supports_image_attachments,
+    adapter_supports_steering,
+)
 from loopx.chat_store import ChatSessionStore  # noqa: E402
 from loopx.kiro_cli_goal_mode import KIRO_CLI_CHAT_AGENT_ID  # noqa: E402
 
@@ -25,7 +31,9 @@ FAKE_ACP = r'''#!/usr/bin/env python3
 import json
 import sys
 import time
+from pathlib import Path
 
+image_report_path = sys.argv[1] if len(sys.argv) > 1 else "/dev/null"
 session_id = "acp:fixture/session"
 active_prompt_id = None
 session_cwd = ""
@@ -42,6 +50,7 @@ for line in sys.stdin:
             "agentCapabilities": {
                 "loadSession": True,
                 "sessionCapabilities": {"close": {}},
+                "promptCapabilities": {"image": True},
             },
         }
     elif method == "session/new":
@@ -54,7 +63,18 @@ for line in sys.stdin:
         result = {}
     elif method == "session/prompt":
         active_prompt_id = request_id
-        prompt = request["params"]["prompt"][0]["text"]
+        blocks = request["params"]["prompt"]
+        prompt = blocks[0]["text"]
+        image_blocks = [item for item in blocks[1:] if item.get("type") == "image"]
+        if image_blocks:
+            # An Agent that advertised promptCapabilities.image must receive
+            # split payload/mime fields, not the client's data URL.
+            for block in image_blocks:
+                assert set(block) == {"type", "data", "mimeType"}, block
+                assert not block["data"].startswith("data:"), block
+            Path(image_report_path).write_text(
+                json.dumps(image_blocks), encoding="utf-8"
+            )
         if "wait for cancel" in prompt:
             continue
         if "activity renew" in prompt:
@@ -141,6 +161,14 @@ def main() -> None:
         adapter = ACPStdioAdapter.start(command=(str(fake),), work_dir=root)
         assert adapter.upstream_thread_id == "acp:fixture/session"
         assert adapter.capabilities()["resume"] is True
+        # ACP v1 has no mid-turn steering call; the runtime gate must read the
+        # declaration rather than the adapter class, or a host is offered a lane
+        # it refuses at runtime.
+        assert adapter.capabilities()["steering"] is False
+        assert adapter_supports_steering(adapter) is False
+        # This Agent advertised promptCapabilities.image, so images are allowed.
+        assert adapter.capabilities()["images"] is True
+        assert adapter_supports_image_attachments(adapter) is True
         events: list[tuple[str, dict[str, object]]] = []
         response = adapter.start_turn("检查状态", lambda kind, payload: events.append((kind, payload)))
         assert response["message"] == "ACP 回答。", response
@@ -155,6 +183,64 @@ def main() -> None:
         assert str(root) not in str(events), events
         assert not any("private thought" in str(payload) for _, payload in events), events
         adapter.close_session()
+
+        # An advertised image capability must reach the Agent as an ACP image
+        # block with split payload and mime type. The fixture asserts the shape
+        # on receipt and reports what it saw.
+        image_report = root / "image-blocks.json"
+        with_images = ACPStdioAdapter.start(
+            command=(str(fake), str(image_report)), work_dir=root
+        )
+        image_response = with_images.start_turn_with_attachments(
+            "看这张图",
+            lambda *_: None,
+            [
+                {
+                    "data_url": "data:image/png;base64,aGVsbG8=",
+                    "id": "att-1",
+                    "mime_type": "image/png",
+                    "name": "shot.png",
+                    "size": 5,
+                }
+            ],
+        )
+        assert image_response["message"] == "ACP 回答。", image_response
+        delivered = json.loads(image_report.read_text(encoding="utf-8"))
+        assert delivered == [
+            {"type": "image", "data": "aGVsbG8=", "mimeType": "image/png"}
+        ], delivered
+        with_images.close_session()
+
+        # An Agent that never advertised image support must be refused before a
+        # prompt is sent, not after the protocol rejects the block.
+        silent = root / "fake-acp-no-images"
+        silent.write_text(
+            FAKE_ACP.replace('"promptCapabilities": {"image": True},', ""),
+            encoding="utf-8",
+        )
+        silent.chmod(silent.stat().st_mode | stat.S_IXUSR)
+        no_images = ACPStdioAdapter.start(command=(str(silent),), work_dir=root)
+        assert no_images.capabilities()["images"] is False
+        assert adapter_supports_image_attachments(no_images) is False
+        try:
+            no_images.start_turn_with_attachments(
+                "看这张图",
+                lambda *_: None,
+                [
+                    {
+                        "data_url": "data:image/png;base64,aGVsbG8=",
+                        "id": "att-1",
+                        "mime_type": "image/png",
+                        "name": "shot.png",
+                        "size": 5,
+                    }
+                ],
+            )
+        except CodexChatAgentError as exc:
+            assert exc.error_code == "provider_unavailable", exc.error_code
+        else:  # pragma: no cover - guarded by the assertion above
+            raise AssertionError("an unadvertised image capability was accepted")
+        no_images.close_session()
 
         renewed = ACPStdioAdapter.start(
             command=(str(fake),),

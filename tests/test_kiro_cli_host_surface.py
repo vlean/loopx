@@ -432,6 +432,29 @@ def test_kiro_cli_is_recognized_across_the_control_plane(
     assert PROJECT_SKILL_SURFACE_ROOTS[HOST_SURFACE] == Path(".kiro") / "skills"
 
 
+def test_kiro_cli_capability_row_declares_steering_and_images(
+    tmp_path: Path,
+) -> None:
+    """The row is what the dashboard renders a lane from, so an undeclared
+    capability becomes a runtime failure the operator cannot predict. Kiro's ACP
+    handshake advertises image prompts but has no mid-turn steering call, and the
+    row has to state both rather than leaving the caller to discover them."""
+    controller = ChatRuntimeController(
+        store=ChatSessionStore(tmp_path / "runtime"),
+        codex_bin="loopx-missing-codex-for-test",
+        kiro_cli_bin=str(_executable_stub(tmp_path / "kiro-cli")),
+    )
+    try:
+        rows = {item["agent_id"]: item for item in controller.capabilities()}
+        assert rows[KIRO_CLI_CHAT_AGENT_ID]["steering"] is False
+        assert rows[KIRO_CLI_CHAT_AGENT_ID]["images"] is True
+        # Every row declares both, so no caller has to infer from adapter class.
+        assert all("steering" in row and "images" in row for row in rows.values())
+        assert rows["codex"]["steering"] is True
+    finally:
+        controller.close()
+
+
 def test_native_goal_facts_match_the_probed_host() -> None:
     """The host-facts constants are the single source the activation packet,
     README and PR narrative cite; they must stay pinned to what the host

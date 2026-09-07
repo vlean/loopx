@@ -168,6 +168,26 @@ read-only Chat session; it is not the governed `/goal` loop, which is entered
 from a Kiro CLI session through the
 [Kiro CLI goal-mode adapter](../../../loopx/kiro_cli_goal_mode/README.md).
 
+### Declared Agent Capabilities
+
+Every row declares `steering` and `images` so a lane is never offered to an
+Agent that would refuse it. Codex supports both. Kiro CLI accepts images — its
+ACP handshake advertises `promptCapabilities.image`, and a probed turn delivered
+the block and completed normally, though whether the selected Kiro agent and
+engine read the image is theirs to decide — but it has no mid-turn steering
+call, so a steering attempt reports `live_steering_unsupported_by_agent` rather
+than the misleading `live_steering_session_not_attached`, which now means only
+that the session is gone. Claude Code and the direct API lanes declare both as
+`false`. An owner-registered ACP endpoint declares `steering: false`, and
+`images: false` because ACP negotiates image support per Agent at session open.
+
+**Behavior change:** a session whose provider was unavailable, or whose last
+stored message is an error, now drops its stale upstream thread id and replays
+visible history on the next turn for **every** non-Codex Agent. Previously only
+`claude-code` recovered this way, so ACP endpoints — including Kiro CLI, whose
+`session/load` keeps rejecting a dead session id — retried the same failure
+until the operator started a new session. Codex keeps its own thread rule.
+
 Source-checkout development is a separate mode:
 
 ```bash
