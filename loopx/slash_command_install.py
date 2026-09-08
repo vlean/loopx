@@ -34,7 +34,7 @@ OPENCODE_GOAL_DEPENDENCIES = {
 def _openai_skill_metadata(*, command: str, display_name: str, short_description: str) -> str:
     return "\n".join(
         [
-            f"# {_managed_marker(command=command, surface='codex-skill-metadata')}",
+            f"# {_managed_marker(command=command, body_family='codex-skill-metadata')}",
             "interface:",
             f'  display_name: "{display_name}"',
             f'  short_description: "{short_description}"',
@@ -54,7 +54,7 @@ def _opencode_command_body(spec: dict[str, Any]) -> str:
                     "agent": "build",
                 }
             ),
-            _managed_marker(command=str(spec["command"]), surface="opencode-command"),
+            _managed_marker(command=str(spec["command"]), body_family="opencode-command"),
             f"Treat this as the LoopX `{spec['command']}` OpenCode command.",
             (
                 "The exact current host is OpenCode. On OpenCode 1, pass "
@@ -274,9 +274,9 @@ def _command_prompt_specs(*, cli_bin: str, include_legacy_aliases: bool) -> list
     return specs
 
 
-def _command_skill_content(spec: dict[str, Any], *, surface: str) -> str:
+def _command_skill_content(spec: dict[str, Any], *, body_family: str) -> str:
     instructions = list(spec["instructions"])
-    if surface == "codex-skills":
+    if body_family == "codex-skills":
         instructions.insert(
             0,
             "On native Windows, run the installed PowerShell 7 entry as `loopx` "
@@ -289,7 +289,7 @@ def _command_skill_content(spec: dict[str, Any], *, surface: str) -> str:
         description=str(spec["description"]),
         argument_hint=str(spec["argument_hint"]),
         instructions=instructions,
-        surface=surface,
+        body_family=body_family,
         front_matter_name=str(spec["name"]),
     )
 
@@ -343,7 +343,7 @@ def materialize_loopx_entry_skill(
     skill_path = skills_dir / "loopx" / "SKILL.md"
     content = _command_skill_content(
         spec,
-        surface=(
+        body_family=(
             "dsh-skills"
             if host_surface == "deepseek-harness-native"
             else "codex-skills"
@@ -851,7 +851,7 @@ def install_slash_commands(
                     }
                 )
                 continue
-            skill_content = _command_skill_content(spec, surface="codex-skills")
+            skill_content = _command_skill_content(spec, body_family="codex-skills")
             skill_status = _target_status(skill_path, skill_content, execute=execute)
             installed.append(
                 {
@@ -947,7 +947,7 @@ def install_slash_commands(
                 description=str(spec["description"]),
                 argument_hint=str(spec["argument_hint"]),
                 instructions=list(spec["instructions"]),
-                surface="claude-skills",
+                body_family="claude-skills",
                 front_matter_name=str(spec["name"]),
             )
             status = _target_status(path, content, execute=execute)

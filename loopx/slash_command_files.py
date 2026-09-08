@@ -15,8 +15,17 @@ EXISTING_LOOPX_CAPABILITY_SKILL_SIGNATURES = (
 )
 
 
-def managed_marker(*, command: str, surface: str) -> str:
-    return f"{MANAGED_MARKER_PREFIX} command={command} surface={surface} -->"
+def managed_marker(*, command: str, body_family: str) -> str:
+    """Stamp the LoopX ownership marker for a generated command file.
+
+    ``body_family`` names the *body shape*, not the install surface: several
+    hosts share one generated body, so `~/.kiro/skills` and `CLAUDE_HOME/skills`
+    both carry `claude-skills`. Only the marker prefix is ever parsed — upgrade
+    and uninstall test for `MANAGED_MARKER_PREFIX` presence — so this value is
+    informational and must not be read back as a host identity.
+    """
+
+    return f"{MANAGED_MARKER_PREFIX} command={command} surface={body_family} -->"
 
 
 def front_matter(*, fields: dict[str, str]) -> str:
@@ -35,23 +44,30 @@ def skill_body(
     description: str,
     argument_hint: str,
     instructions: list[str],
-    surface: str,
+    body_family: str,
     front_matter_name: str | None = None,
 ) -> str:
+    """Render one managed command file body.
+
+    ``body_family`` selects the shared body shape and its prose label; it is not
+    the install surface. ``install_skill_facade`` deliberately renders every
+    directory-layout skill host from the same `claude-skills` body so the files
+    stay byte-comparable across hosts.
+    """
     fields = {"description": description, "argument-hint": argument_hint}
     if front_matter_name:
         fields = {"name": front_matter_name, **fields}
     surface_label = (
         "slash command"
-        if surface == "claude-skills"
+        if body_family == "claude-skills"
         else "DSH workflow skill"
-        if surface == "dsh-skills"
+        if body_family == "dsh-skills"
         else "explicit LoopX command skill"
     )
     return "\n\n".join(
         [
             front_matter(fields=fields),
-            managed_marker(command=command, surface=surface),
+            managed_marker(command=command, body_family=body_family),
             f"# {title}",
             f"Treat this as the LoopX `{command}` {surface_label}.",
             "\n".join(instructions),
@@ -146,7 +162,7 @@ def install_skill_facade(
             description=str(spec["description"]),
             argument_hint=str(spec["argument_hint"]),
             instructions=list(spec["instructions"]),
-            surface="claude-skills",
+            body_family="claude-skills",
             front_matter_name=str(spec["name"]),
         )
         installed.append(
