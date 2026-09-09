@@ -44,7 +44,10 @@ def test_host_materialization_installs_generated_loopx_entry_skill(
         "path": str(skill),
         "status": "created",
     }
-    assert 'name: "loopx"' in skill_text
+    # A plain scalar, not `name: "loopx"`: hosts such as Kiro CLI keep the quote
+    # characters verbatim and would expose the skill as `/"loopx"`.
+    assert "name: loopx\n" in skill_text
+    assert 'name: "loopx"' not in skill_text
     assert "ark-managed-agent" in skill_text
     assert "--slash-command-arguments" in skill_text
     assert "The CLI, not the model, owns parsing" in skill_text
@@ -157,8 +160,12 @@ def test_codex_install_upgrades_managed_loopx_facade(tmp_path: Path) -> None:
     assert "follow its exact CLI `interaction_contract` or quota command first" in skill_text
     assert "treat `--action-kind` as the documented extensible public-safe token" in skill_text
     assert "do not search the LoopX source for an allowlist" in skill_text
-    assert "never pipe a `--begin-turn` call through `head` or `tail`" in skill_text
-    assert "never rerun `--begin-turn` to recover hidden fields" in skill_text
+    assert "never pipe it through `head` or `tail`" in skill_text
+    assert "never rerun the turn-start call to recover hidden fields" in skill_text
+    # A skill facade is installed for every host, so it must not present a
+    # Codex-only flag as the universal turn-start mechanism.
+    assert "never pipe a `--begin-turn` call" not in skill_text
+    assert "passes its own `--turn-instance-id`" in skill_text
     assert "interaction_contract.cli_channel.selection_command" in skill_text
     assert "do not return merely after setup, planning, or claim" not in skill_text
     metadata_text = metadata.read_text(encoding="utf-8")
@@ -679,7 +686,7 @@ def test_gemini_surface_writes_skill_files_gemini_cli_can_discover(tmp_path: Pat
     assert skill.exists()
     body = skill.read_text(encoding="utf-8")
     assert body.startswith("---")
-    assert 'name: "loopx"' in body
+    assert "name: loopx\n" in body
 
     row = _row(payload, "gemini_cli_skills")
     assert row["surface"] == "gemini"
@@ -712,7 +719,7 @@ def test_cursor_surface_installs_skills(tmp_path: Path) -> None:
     )
     skill = cursor_home / "skills" / "loopx" / "SKILL.md"
     assert skill.exists()
-    assert 'name: "loopx"' in skill.read_text(encoding="utf-8")
+    assert "name: loopx\n" in skill.read_text(encoding="utf-8")
     assert _row(payload, "cursor_skills")["host_surfaces"] == ["cursor-agent"]
 
 
